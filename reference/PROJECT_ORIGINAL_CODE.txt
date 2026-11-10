@@ -1,0 +1,524 @@
+#include <Arduino.h>
+#include <Adafruit_TinyUSB.h>
+#include <bluefruit.h>
+#include <stdio.h>
+#include <string.h>
+
+// =====================================================
+// CHANGE LOG
+// =====================================================
+// 001: Keep motor pin D0 and correct its comment.
+// 002: Configure total wristband count and this device ID.
+// 003: Ignore wristbands belonging to the same person.
+// 004: Generate the name list and size all RSSI arrays
+//      automatically from NUM_WRISTBANDS.
+// 005: Preserve BLE names Player1, Player2, Player3, etc.
+
+// =====================================================
+// DEVICE CONFIGURATION - EDIT THESE TWO VALUES
+// =====================================================
+
+// Use the same total on every wristband.
+// Example: 6 wristbands = 3 people with 2 wristbands each.
+const int NUM_WRISTBANDS = 4;
+
+// Set a unique ID on each device before uploading.
+// Valid IDs: 1 to NUM_WRISTBANDS.
+const int MY_WRISTBAND_ID = 3;
+
+// Consecutive pairs belong to the same person:
+// Person 1: Player1 (left) + Player2 (right)
+// Person 2: Player3 (left) + Player4 (right)
+// Person 3: Player5 (left) + Player6 (right)
+
+static_assert(NUM_WRISTBANDS >= 2,
+              "Configure at least two wristbands.");
+static_assert(NUM_WRISTBANDS % 2 == 0,
+              "Use an even number: two wristbands per person.");
+static_assert(MY_WRISTBAND_ID >= 1 &&
+              MY_WRISTBAND_ID <= NUM_WRISTBANDS,
+              "MY_WRISTBAND_ID must be between 1 and NUM_WRISTBANDS.");
+
+// =====================================================
+// MOTOR
+// =====================================================
+
+const int MOTOR_PIN = D0;  // Vibration motor control pin
+
+// =====================================================
+// AUTOMATIC WRISTBAND NAMES
+// =====================================================
+
+const int NAME_BUFFER_SIZE = 32;
+char wristbandNames[NUM_WRISTBANDS][NAME_BUFFER_SIZE];
+
+// =====================================================
+// RSSI FILTER AND DETECTION STATE
+// =====================================================
+
+const int RSSI_SAMPLES = 5;
+
+// Array index = wristband ID - 1.
+int rssiBuffer[NUM_WRISTBANDS][RSSI_SAMPLES];
+int rssiIndex[NUM_WRISTBANDS] = {};
+bool rssiBufferFull[NUM_WRISTBANDS] = {};
+bool wristbandDetected[NUM_WRISTBANDS] = {};
+unsigned long lastWristbandSeen[NUM_WRISTBANDS] = {};
+
+const unsigned long WRISTBAND_TIMEOUT = 1500;
+const unsigned long RSSI_UPDATE_INTERVAL = 500;
+unsigned long lastRSSIUpdate = 0;
+
+// =====================================================
+// VIBRATION STATE
+// =====================================================
+
+bool motorState = false;
+unsigned long lastMotorChange = 0;
+
+// RSSI-based proximity categories, not measured distances.
+enum DistanceLevel {
+  VERY_CLOSE,
+  CLOSE,
+  MEDIUM,
+  FAR,
+  VERY_FAR,
+  NO_SIGNAL
+};
+
+DistanceLevel currentLevel = NO_SIGNAL;
+
+// =====================================================
+// FUNCTION DECLARATIONS
+// =====================================================
+
+int getPersonId(int wristbandId);
+bool shouldProcessWristband(int wristbandId);
+int getWristbandIndex(const char* deviceName);
+void scan_callback(ble_gap_evt_adv_report_t* report);
+void addRSSI(int wristband, int rssi);
+int getAverageRSSI(int wristband);
+int getStrongestWristband();
+DistanceLevel classifyRSSI(int rssi);
+void printLevel(DistanceLevel level);
+void updateBLE();
+void updateVibration();
+void startAdvertising();
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println();
+  Serial.println("==============================");
+  Serial.println("Prototype 2");
+  Serial.println("BLE Vibration Wristband");
+  Serial.println("==============================");
+
+  pinMode(MOTOR_PIN, OUTPUT);
+  digitalWrite(MOTOR_PIN, LOW);
+
+  // Generate all valid BLE names and initialize RSSI buffers.
+  for (int i = 0; i < NUM_WRISTBANDS; i++) {
+    snprintf(wristbandNames[i], sizeof(wristbandNames[i]),
+             "Player%d", i + 1);
+
+    for (int sample = 0; sample < RSSI_SAMPLES; sample++) {
+      rssiBuffer[i][sample] = -100;
+    }
+  }
+
+  Serial.println("Starting Bluefruit BLE...");
+
+  // Initialize Bluefruit with peripheral and central support.
+  if (!Bluefruit.begin(1, 1)) {
+    Serial.println("ERROR: Bluefruit initialization failed!");
+
+    // Repeat the error pattern until reset or power-off.
+    while (1) {
+      digitalWrite(MOTOR_PIN, HIGH);
+      delay(100);
+      digitalWrite(MOTOR_PIN, LOW);
+      delay(900);
+    }
+  }
+
+  // Automatically derive this device's BLE name from its ID.
+  Bluefruit.setName(wristbandNames[MY_WRISTBAND_ID - 1]);
+  Bluefruit.setTxPower(4);
+
+  Serial.print("My wristband ID: ");
+  Serial.println(MY_WRISTBAND_ID);
+  Serial.print("My BLE name: ");
+  Serial.println(wristbandNames[MY_WRISTBAND_ID - 1]);
+  Serial.print("My person ID: ");
+  Serial.println(getPersonId(MY_WRISTBAND_ID));
+  Serial.print("Total wristbands: ");
+  Serial.println(NUM_WRISTBANDS);
+
+  startAdvertising();
+
+  Bluefruit.Scanner.setRxCallback(scan_callback);
+  Bluefruit.Scanner.restartOnDisconnect(true);
+
+  // Scan interval = 100 ms; scan window = 50 ms.
+  Bluefruit.Scanner.setInterval(160, 80);
+
+  // Request scan-response data, which can contain the name.
+  Bluefruit.Scanner.useActiveScan(true);
+
+  Serial.println("Starting BLE scan...");
+  Bluefruit.Scanner.start(0);
+
+  Serial.println("BLE initialized.");
+  Serial.println("Allowed wristbands:");
+
+  for (int i = 0; i < NUM_WRISTBANDS; i++) {
+    if (shouldProcessWristband(i + 1)) {
+      Serial.print(" - ");
+      Serial.println(wristbandNames[i]);
+    }
+  }
+
+  Serial.println("Ignored wristbands from my person:");
+
+  for (int i = 0; i < NUM_WRISTBANDS; i++) {
+    if (getPersonId(i + 1) == getPersonId(MY_WRISTBAND_ID)) {
+      Serial.print(" - ");
+      Serial.println(wristbandNames[i]);
+    }
+  }
+
+  Serial.println();
+  Serial.println("Waiting for wristbands...");
+  Serial.println();
+}
+
+// =====================================================
+// MAIN LOOP
+// =====================================================
+
+void loop() {
+  if (millis() - lastRSSIUpdate >= RSSI_UPDATE_INTERVAL) {
+    lastRSSIUpdate = millis();
+    updateBLE();
+  }
+
+  updateVibration();
+}
+
+// =====================================================
+// PERSON ASSIGNMENT AND WRISTBAND FILTER
+// =====================================================
+
+int getPersonId(int wristbandId) {
+  // Integer division maps 1/2 to 1, 3/4 to 2, 5/6 to 3, etc.
+  return (wristbandId - 1) / 2 + 1;
+}
+
+bool shouldProcessWristband(int wristbandId) {
+  if (wristbandId < 1 || wristbandId > NUM_WRISTBANDS) {
+    return false;
+  }
+
+  // Ignore both this device and the other wristband
+  // belonging to the same person.
+  return getPersonId(wristbandId) != getPersonId(MY_WRISTBAND_ID);
+}
+
+int getWristbandIndex(const char* deviceName) {
+  // Only exact names Player1 to PlayerN are accepted.
+  for (int i = 0; i < NUM_WRISTBANDS; i++) {
+    if (strcmp(deviceName, wristbandNames[i]) == 0) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+// =====================================================
+// BLE ADVERTISING
+// =====================================================
+
+void startAdvertising() {
+  Bluefruit.Advertising.addFlags(
+    BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE
+  );
+
+  Bluefruit.Advertising.addTxPower();
+  Bluefruit.Advertising.addName();
+  Bluefruit.ScanResponse.addName();
+  Bluefruit.Advertising.restartOnDisconnect(true);
+
+  // Fast interval = 20 ms; slow interval = 152.5 ms.
+  Bluefruit.Advertising.setInterval(32, 244);
+  Bluefruit.Advertising.setFastTimeout(30);
+  Bluefruit.Advertising.start(0);
+
+  Serial.println("BLE advertising started.");
+}
+
+// =====================================================
+// BLE SCAN CALLBACK
+// =====================================================
+
+void scan_callback(ble_gap_evt_adv_report_t* report) {
+  char deviceName[NAME_BUFFER_SIZE] = {};
+
+  uint8_t nameLength = Bluefruit.Scanner.parseReportByType(
+    report,
+    BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME,
+    (uint8_t*)deviceName,
+    sizeof(deviceName) - 1
+  );
+
+  if (nameLength == 0) {
+    nameLength = Bluefruit.Scanner.parseReportByType(
+      report,
+      BLE_GAP_AD_TYPE_SHORT_LOCAL_NAME,
+      (uint8_t*)deviceName,
+      sizeof(deviceName) - 1
+    );
+  }
+
+  if (nameLength == 0) {
+    Bluefruit.Scanner.resume();
+    return;
+  }
+
+  deviceName[nameLength] = '\0';
+
+  int wristbandIndex = getWristbandIndex(deviceName);
+
+  // Reject unknown names and both wristbands of our own person.
+  if (wristbandIndex < 0 ||
+      !shouldProcessWristband(wristbandIndex + 1)) {
+    Bluefruit.Scanner.resume();
+    return;
+  }
+
+  wristbandDetected[wristbandIndex] = true;
+  lastWristbandSeen[wristbandIndex] = millis();
+
+  int rawRSSI = report->rssi;
+  addRSSI(wristbandIndex, rawRSSI);
+
+  Serial.print("WRISTBAND: ");
+  Serial.print(deviceName);
+  Serial.print(" | RSSI: ");
+  Serial.print(rawRSSI);
+  Serial.println(" dBm");
+
+  Bluefruit.Scanner.resume();
+}
+
+// =====================================================
+// UPDATE BLE STATE
+// =====================================================
+
+void updateBLE() {
+  unsigned long currentTime = millis();
+
+  for (int i = 0; i < NUM_WRISTBANDS; i++) {
+    if (wristbandDetected[i] &&
+        currentTime - lastWristbandSeen[i] > WRISTBAND_TIMEOUT) {
+      wristbandDetected[i] = false;
+    }
+  }
+
+  int strongestWristband = getStrongestWristband();
+
+  if (strongestWristband >= 0) {
+    int strongestRSSI = getAverageRSSI(strongestWristband);
+    currentLevel = classifyRSSI(strongestRSSI);
+
+    Serial.print("STRONGEST WRISTBAND: ");
+    Serial.print(wristbandNames[strongestWristband]);
+    Serial.print(" | FILTERED RSSI: ");
+    Serial.print(strongestRSSI);
+    Serial.print(" dBm | ");
+    printLevel(currentLevel);
+  } else {
+    currentLevel = NO_SIGNAL;
+    Serial.println("NO WRISTBAND DETECTED");
+  }
+
+  Serial.println("------------------------------");
+}
+
+// =====================================================
+// RSSI MOVING AVERAGE
+// =====================================================
+
+void addRSSI(int wristband, int rssi) {
+  rssiBuffer[wristband][rssiIndex[wristband]] = rssi;
+  rssiIndex[wristband]++;
+
+  if (rssiIndex[wristband] >= RSSI_SAMPLES) {
+    rssiIndex[wristband] = 0;
+    rssiBufferFull[wristband] = true;
+  }
+}
+
+int getAverageRSSI(int wristband) {
+  int numberOfSamples = rssiBufferFull[wristband]
+                        ? RSSI_SAMPLES
+                        : rssiIndex[wristband];
+
+  if (numberOfSamples == 0) {
+    return -100;
+  }
+
+  long sum = 0;
+
+  for (int i = 0; i < numberOfSamples; i++) {
+    sum += rssiBuffer[wristband][i];
+  }
+
+  return sum / numberOfSamples;
+}
+
+int getStrongestWristband() {
+  int strongestWristband = -1;
+  int strongestRSSI = -100;
+
+  for (int i = 0; i < NUM_WRISTBANDS; i++) {
+    if (wristbandDetected[i]) {
+      int filteredRSSI = getAverageRSSI(i);
+
+      // Example: -45 dBm is stronger than -70 dBm.
+      if (filteredRSSI > strongestRSSI) {
+        strongestRSSI = filteredRSSI;
+        strongestWristband = i;
+      }
+    }
+  }
+
+  return strongestWristband;
+}
+
+// =====================================================
+// RSSI CLASSIFICATION
+// =====================================================
+
+DistanceLevel classifyRSSI(int rssi) {
+  if (rssi > -50) return VERY_CLOSE;
+  if (rssi > -65) return CLOSE;
+  if (rssi > -70) return MEDIUM;
+  if (rssi > -75) return FAR;
+  if (rssi > -90) return VERY_FAR;
+  return NO_SIGNAL;
+}
+
+void printLevel(DistanceLevel level) {
+  switch (level) {
+    case VERY_CLOSE: Serial.println("VERY CLOSE"); break;
+    case CLOSE:      Serial.println("CLOSE");      break;
+    case MEDIUM:     Serial.println("MEDIUM");     break;
+    case FAR:        Serial.println("FAR");        break;
+    case VERY_FAR:   Serial.println("VERY FAR");   break;
+    case NO_SIGNAL:  Serial.println("NO SIGNAL");  break;
+  }
+}
+
+// =====================================================
+// VIBRATION
+// =====================================================
+// Original pulse durations and transition behavior retained.
+// The RSSI update does not restart the vibration cycle.
+
+void updateVibration() {
+  unsigned long currentTime = millis();
+
+  switch (currentLevel) {
+    case VERY_CLOSE:
+      if (!motorState) {
+        if (currentTime - lastMotorChange >= 100) {
+          motorState = true;
+          digitalWrite(MOTOR_PIN, HIGH);
+          lastMotorChange = currentTime;
+        }
+      } else {
+        if (currentTime - lastMotorChange >= 250) {
+          motorState = false;
+          digitalWrite(MOTOR_PIN, LOW);
+          lastMotorChange = currentTime;
+        }
+      }
+      break;
+
+    case CLOSE:
+      if (!motorState) {
+        if (currentTime - lastMotorChange >= 150) {
+          motorState = true;
+          digitalWrite(MOTOR_PIN, HIGH);
+          lastMotorChange = currentTime;
+        }
+      } else {
+        if (currentTime - lastMotorChange >= 150) {
+          motorState = false;
+          digitalWrite(MOTOR_PIN, LOW);
+          lastMotorChange = currentTime;
+        }
+      }
+      break;
+
+    case MEDIUM:
+      if (!motorState) {
+        if (currentTime - lastMotorChange >= 350) {
+          motorState = true;
+          digitalWrite(MOTOR_PIN, HIGH);
+          lastMotorChange = currentTime;
+        }
+      } else {
+        if (currentTime - lastMotorChange >= 150) {
+          motorState = false;
+          digitalWrite(MOTOR_PIN, LOW);
+          lastMotorChange = currentTime;
+        }
+      }
+      break;
+
+    case FAR:
+      if (!motorState) {
+        if (currentTime - lastMotorChange >= 700) {
+          motorState = true;
+          digitalWrite(MOTOR_PIN, HIGH);
+          lastMotorChange = currentTime;
+        }
+      } else {
+        if (currentTime - lastMotorChange >= 150) {
+          motorState = false;
+          digitalWrite(MOTOR_PIN, LOW);
+          lastMotorChange = currentTime;
+        }
+      }
+      break;
+
+    case VERY_FAR:
+      if (!motorState) {
+        if (currentTime - lastMotorChange >= 1200) {
+          motorState = true;
+          digitalWrite(MOTOR_PIN, HIGH);
+          lastMotorChange = currentTime;
+        }
+      } else {
+        if (currentTime - lastMotorChange >= 100) {
+          motorState = false;
+          digitalWrite(MOTOR_PIN, LOW);
+          lastMotorChange = currentTime;
+        }
+      }
+      break;
+
+    case NO_SIGNAL:
+      motorState = false;
+      digitalWrite(MOTOR_PIN, LOW);
+      break;
+  }
+}

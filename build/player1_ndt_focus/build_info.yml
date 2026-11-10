@@ -1,0 +1,66 @@
+cmake:
+  application:
+    configuration-dir: 'C:/Users/Lenovo/Documents/AWNDTC'
+    source-dir: 'C:/Users/Lenovo/Documents/AWNDTC'
+  board:
+    name: 'xiao_ble'
+    path:
+     - 'C:/ncs/v3.4.1/zephyr/boards/seeed/xiao_ble'
+    qualifiers: 'nrf52840'
+    revision: ''
+  devicetree:
+    bindings-dirs:
+     - 'C:/ncs/v3.4.1/nrf/dts/bindings'
+     - 'C:/ncs/v3.4.1/zephyr/dts/bindings'
+    files:
+     - 'C:/ncs/v3.4.1/zephyr/boards/seeed/xiao_ble/xiao_ble.dts'
+     - 'boards/xiao_ble_nrf52840.overlay'
+     - 'boards/usb_cdc.overlay'
+    include-dirs:
+     - 'C:/ncs/v3.4.1/nrf/include'
+     - 'C:/ncs/v3.4.1/nrf/dts/common'
+     - 'C:/ncs/v3.4.1/nrf/dts/riscv'
+     - 'C:/ncs/v3.4.1/nrf/dts/arm'
+     - 'C:/ncs/v3.4.1/nrf/dts'
+     - 'C:/ncs/v3.4.1/zephyr/include'
+     - 'C:/ncs/v3.4.1/zephyr/include/zephyr'
+     - 'C:/ncs/v3.4.1/zephyr/dts/common'
+     - 'C:/ncs/v3.4.1/zephyr/dts/vendor'
+     - 'C:/ncs/v3.4.1/zephyr/dts/rx'
+     - 'C:/ncs/v3.4.1/zephyr/dts/x86'
+     - 'C:/ncs/v3.4.1/zephyr/dts/xtensa'
+     - 'C:/ncs/v3.4.1/zephyr/dts/sparc'
+     - 'C:/ncs/v3.4.1/zephyr/dts/riscv'
+     - 'C:/ncs/v3.4.1/zephyr/dts/posix'
+     - 'C:/ncs/v3.4.1/zephyr/dts/arm64'
+     - 'C:/ncs/v3.4.1/zephyr/dts/arm'
+     - 'C:/ncs/v3.4.1/zephyr/dts/arc'
+     - 'C:/ncs/v3.4.1/zephyr/dts'
+    user-files:
+     - 'boards/xiao_ble_nrf52840.overlay'
+     - 'boards/usb_cdc.overlay'
+  kconfig:
+    extra-user-files:
+     - 'dm.conf'
+     - 'usb.conf'
+    files:
+     - 'C:/ncs/v3.4.1/zephyr/boards/seeed/xiao_ble/xiao_ble_defconfig'
+     - 'C:/Users/Lenovo/Documents/AWNDTC/prj.conf'
+     - 'C:/Users/Lenovo/Documents/AWNDTC/dm.conf'
+     - 'C:/Users/Lenovo/Documents/AWNDTC/usb.conf'
+    user-files:
+     - 'C:/Users/Lenovo/Documents/AWNDTC/prj.conf'
+  toolchain:
+    name: 'zephyr'
+    path: 'C:/ncs/toolchains/4f5b6ad6dd/opt/zephyr-sdk'
+  vendor-specific:
+    nordic:
+      svdfile: 'C:/ncs/v3.4.1/modules/hal/nordic/nrfx/bsp/stable/mdk/nrf52840.svd'
+  zephyr:
+    version: '4.4.2'
+    zephyr-base: 'C:/ncs/v3.4.1/zephyr'
+version: '0.1.0'
+west:
+  command: 'C:\ncs\toolchains\4f5b6ad6dd\opt\bin\Scripts\west build --no-sysbuild -b xiao_ble/nrf52840 -p always -d build/player1_ndt_focus . -- -DMY_WRISTBAND_ID=1 -DNUM_WRISTBANDS=4 -DENABLE_PERIODIC=0 -DDTC_OVERLAY_FILE=boards/xiao_ble_nrf52840.overlay;boards/usb_cdc.overlay -DEXTRA_CONF_FILE=dm.conf;usb.conf'
+  topdir: 'c:\ncs\v3.4.1'
+  version: '1.5.0'

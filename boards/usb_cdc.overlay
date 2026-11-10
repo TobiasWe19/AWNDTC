@@ -1,0 +1,6 @@
+/* Use the USB CDC ACM UART already defined by the XIAO board. */
+/ {
+    chosen {
+        zephyr,console = &board_cdc_acm_uart;
+    };
+};

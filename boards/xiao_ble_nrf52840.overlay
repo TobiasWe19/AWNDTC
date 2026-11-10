@@ -1,0 +1,7 @@
+/* Nordic DM requires a dedicated hardware TIMER for its radio ranging.
+ * TIMER2 is Nordic's default example and must not be claimed elsewhere. */
+/ {
+    chosen {
+        ncs,dm-timer = &timer2;
+    };
+};
